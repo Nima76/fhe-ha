@@ -11,26 +11,30 @@ services:
       - encrypted_data:/bdt/build/results
       - cryptocontext:/bdt/build/cryptocontext
       - private_key:/bdt/build/private_data
-      - ./HEHAEnc/timing/:/bdt/build/timing
+      - ./HEHAEnc/build/timing/:/bdt/build/timing
     command: tail -f /dev/null
     networks:
       - soteria_network
 
-
-  # FHE MAIN
+  # FHE MAIN (GPU, stays running until you exec into it)
   fhe-main:
     build: ./HEHAMain
-    container_name: fhe-main
+    container_name: heha-main
     volumes:
       - analytics_results:/bdt/build/results
       - encrypted_data:/bdt/build/data
-      - ./HEHAMain/timing/:/bdt/build/timing
-      
-    command: tail -f /dev/null  
+      - ./HEHAMain/build/timing/:/bdt/build/timing
+    command: tail -f /dev/null   # keeps container running, does NOT start main process
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
     networks:
       - soteria_network
-  
-  
+
   # FHE DECRYPTOR
   fhe-decryptor:
     build: ./HEHADec
@@ -40,17 +44,14 @@ services:
       - analytics_results:/bdt/build/data
       - cryptocontext:/bdt/build/cryptocontext/
       - private_key:/bdt/build/private_data
-      - ./HEHADec/timing/:/bdt/build/timing
-     
+      - ./HEHADec/build/timing/:/bdt/build/timing
     networks:
       - soteria_network
-
 
 networks:
   soteria_network:
     name: "soteria_network"
     external: true
-
 
 volumes:
   encrypted_data:
