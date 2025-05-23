@@ -1,5 +1,6 @@
 # Base image
-FROM nimafrj/2204accopenfhe:1.0.3
+FROM nimafrj/2204openfheuniman:1.0.3
+
 
 WORKDIR /app
 COPY encrypt-fintech-analytics.cpp /app/encrypt-fintech-analytics.cpp
