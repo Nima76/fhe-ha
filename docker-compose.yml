@@ -7,7 +7,7 @@ services:
     build: ./HEHAEnc
     container_name: fhe-enc
     volumes:
-      - ./HEHAEnc/data:/bdt/build/data
+      - ./HEHAEnc/build/data:/bdt/build/data
       - encrypted_data:/bdt/build/results
       - cryptocontext:/bdt/build/cryptocontext
       - private_key:/bdt/build/private_data
