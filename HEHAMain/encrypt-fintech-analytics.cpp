@@ -6,7 +6,6 @@
 #include <filesystem>
 #include <string>
 #include <cmath>
-#include <chrono>
 
 // header files needed for serialization
 #include "ciphertext-ser.h"
@@ -14,13 +13,19 @@
 #include "key/key-ser.h"
 #include "scheme/bgvrns/bgvrns-ser.h"
 
+#include <utils/timers.h>
+
 using namespace lbcrypto;
-using namespace std::chrono;
 namespace fs = std::filesystem;
 
 const std::string DATAFOLDER = "data";
 const std::string RESULTSFOLDER = "results";
-const std::string TimingFolder = "timing";
+
+int numOfMultiplications = 0;
+// End-to-end execution time timer
+TimeVar appTimer;
+// Timer for Homomorphic multiplications execution time
+TimeVar homTimer;
 
 //binary decision trees
 typedef struct bdt
@@ -45,17 +50,6 @@ typedef struct bdt_ct
 	bdt_ct* left;
 	bdt_ct* right;
 } bdt_ct;
-
-// Function to write timing results to file
-void writeTimingToFile(const std::string& filename, const std::string& operation, double timeInMs) {
-    std::ofstream outfile(TimingFolder + "/" + filename, std::ios::app);
-    if (!outfile) {
-        std::cerr << "Could not open timing file for writing" << std::endl;
-        return;
-    }
-    outfile << operation << "," << timeInMs << std::endl;
-    outfile.close();
-}
 
 //caculating the depth of the input tree
 int calculateDepth(const std::string& directory) {
@@ -163,21 +157,6 @@ void ebdt_deserialize(bdt_ct *tree, std::string name, int depth)
     int cpt = 0;
     int* tag = &cpt;
 	ebdt_deserialize_switched(tree, name, depth, tag);
-}
-
-// Clean up memory for bdt_ct structure
-void freeCTTree(bdt_ct* tree) {
-    if (tree == nullptr) return;
-    
-    if (tree->left != nullptr) {
-        freeCTTree(tree->left);
-        delete tree->left;
-    }
-    
-    if (tree->right != nullptr) {
-        freeCTTree(tree->right);
-        delete tree->right;
-    }
 }
 
 // homomorphic node-per-node substraction of two encrypted BDTs (the result being a new encrypted BDT)
@@ -328,10 +307,13 @@ std::vector<std::vector<Ciphertext<DCRTPoly>>> encrypted_result_before_mult(Cryp
 	for(int i=0; i<number_of_leaves; i++)
 	{
 		result[i] = std::vector<Ciphertext<DCRTPoly>>(depth);
+		TIC(homTimer);
 		for(int j=0; j<depth; j++)
 		{
 		   result[i][j] = cc->EvalSub(cc->EvalMult(deltas[i][j], deltas[i][j]), encrypted_abstract_reversePaths(cc, depth, pk)[i][j]);
+		   numOfMultiplications++;
 		}
+		accumulateTimer(operationsTimer, TOC_MS(homTimer));
 	}
 	return result;
 } 
@@ -340,10 +322,13 @@ std::vector<std::vector<Ciphertext<DCRTPoly>>> encrypted_result_before_mult(Cryp
 Ciphertext<DCRTPoly> evalGlobalProd(CryptoContext<DCRTPoly> cc, std::vector<Ciphertext<DCRTPoly>> ciphertexts)
 {
 	Ciphertext<DCRTPoly> result = ciphertexts[0];
+	TIC(homTimer);
 	for(unsigned int i=1; i<ciphertexts.size(); i++)
 	{
 	   result = cc->EvalMult(result, ciphertexts[i]);
+	   numOfMultiplications++;
 	}
+	accumulateTimer(operationsTimer, TOC_MS(homTimer));
 	return result;
 }
 
@@ -384,10 +369,13 @@ Ciphertext<DCRTPoly> encrypted_result(CryptoContext<DCRTPoly> cc, bdt_ct tree, b
 	 for(int i=0; i<pow(2, depth); i++)
 	 {
 		 bin_result_at_some_slot.push_back({});
+		 TIC(homTimer);
 		 for(int j=0; j<depth; j++)
 		 {
 			 bin_result_at_some_slot[i].push_back(cc->EvalMult(eap[i][j], eram[i]));
+			 numOfMultiplications++;
 		 }
+		 accumulateTimer(operationsTimer, TOC_MS(homTimer));
 	 }
 	
 	
@@ -405,17 +393,23 @@ Ciphertext<DCRTPoly> encrypted_result(CryptoContext<DCRTPoly> cc, bdt_ct tree, b
 	}
 	
 	//(here the -1 values are turned into 1 values in order to have each value at 0 or 1)
+	TIC(homTimer);
 	for(int j=0; j<depth; j++)
 	{
 		bin_result[j] = cc->EvalMult(bin_result[j], bin_result[j]);
+		numOfMultiplications++;
 	}
+	accumulateTimer(operationsTimer, TOC_MS(homTimer));
 
 	Ciphertext<DCRTPoly> result = cc->Encrypt(pk, cc->MakePackedPlaintext({0}));
 	std::vector<Ciphertext<DCRTPoly>> acc;
 	acc = std::vector<Ciphertext<DCRTPoly>>();
 	for(int j=0; j<depth; j++)
 	{		
+		TIC(homTimer);
 		acc.push_back(cc->EvalMult(bin_result[j], powersOf2(cc, depth, pk)[j]));
+		numOfMultiplications++;
+		accumulateTimer(operationsTimer, TOC_MS(homTimer));
 		result = cc->EvalAdd(acc[j], result);
 	}
 	
@@ -428,50 +422,26 @@ Ciphertext<DCRTPoly> encrypted_result(CryptoContext<DCRTPoly> cc, bdt_ct tree, b
 //                                         //
 /////////////////////////////////////////////
 
-int main(int argc, char* argv[])
+int main()
 {
-    // Default parameters
-    int manualDepth = 0; // 0 means auto-detect
-    std::string timingFile = "timing_evaluation.csv";
-    
-    // Parse command line arguments
-    for (int i = 1; i < argc; i++) {
-        std::string arg = argv[i];
-        if (arg == "--depth" && i + 1 < argc) {
-            manualDepth = std::stoi(argv[++i]);
-        } else if (arg == "--timing" && i + 1 < argc) {
-            timingFile = argv[++i];
-        } else if (arg == "--help") {
-            std::cout << "Usage: " << argv[0] << " [OPTIONS]\n"
-                      << "Options:\n"
-                      << "  --depth N      Manually set tree depth (default: auto-detect)\n"
-                      << "  --timing FILE  Specify timing output file (default: timing_evaluation.csv)\n"
-                      << "  --help         Display this help message\n";
-            return 0;
-        }
-    }
-    
-    // Create results directory if it doesn't exist
-    //system(("mkdir -p " + RESULTSFOLDER).c_str());
-    
-    // Initialize timing file with header
-    std::ofstream timingInit(TimingFolder + "/" + timingFile);
-    timingInit << "Operation,TimeInMilliseconds" << std::endl;
-    timingInit.close();
-    
-    auto startTotal = high_resolution_clock::now();
-    
-    // Getting the depth
-    auto startDepth = high_resolution_clock::now();
-    int depth = manualDepth > 0 ? manualDepth : calculateDepth(DATAFOLDER);
-    std::cout << "Tree depth: " << depth << std::endl;
-    auto stopDepth = high_resolution_clock::now();
-    double depthTime = duration_cast<milliseconds>(stopDepth - startDepth).count();
-    writeTimingToFile(timingFile, "Depth_Detection", depthTime);
-    
-    // Getting the crypto-context and the the public keys
-    auto startCtxLoad = high_resolution_clock::now();
-    CryptoContext<DCRTPoly> cc;
+
+	// Tic end-to-end timer
+	TIC(appTimer);
+
+	#if defined(WITH_CUDA)
+	// Access the singleton instance of cudaDataUtils
+	cudaDataUtils& cudaUtils = cudaDataUtils::getInstance();
+	// Set GPU configuration - Note: suitable for T4 in AzureVM
+	// ringDim = 32768, sizeP = 3, sizeQ = 9, PHatModq_size_y = 10
+	cudaUtils.initialize(64, 512, 10, 32768, 3, 9, 10);
+	#endif
+
+	//getting the depth
+	int depth = calculateDepth(DATAFOLDER);
+	//int depth = atoi(argv[1]);
+	
+	//getting the crypto-context and the the public keys
+	CryptoContext<DCRTPoly> cc;
     if (!Serial::DeserializeFromFile(DATAFOLDER + "/cryptocontext.txt", cc, SerType::BINARY)) {
         std::cerr << "I cannot read serialization from " << DATAFOLDER + "/cryptocontext.txt" << std::endl;
         return 1;
@@ -495,64 +465,41 @@ int main(int argc, char* argv[])
         return 1;
     }
     std::cout << "Deserialized the eval mult keys." << std::endl;
-    auto stopCtxLoad = high_resolution_clock::now();
-    double ctxLoadTime = duration_cast<milliseconds>(stopCtxLoad - startCtxLoad).count();
-    writeTimingToFile(timingFile, "Context_Loading", ctxLoadTime);
     
-    // Getting the encrypted binary decision tree
-    auto startTreeLoad = high_resolution_clock::now();
+    //getting the encrypted binary decision tree
     bdt_ct *p_tree = new bdt_ct();
     ebdt_deserialize(p_tree, "encrypted_tree", depth);
     bdt_ct encrypted_tree = *p_tree;
-    auto stopTreeLoad = high_resolution_clock::now();
-    double treeLoadTime = duration_cast<milliseconds>(stopTreeLoad - startTreeLoad).count();
-    writeTimingToFile(timingFile, "Tree_Loading", treeLoadTime);
     
-    // Getting the encrypted client data
-    auto startDataLoad = high_resolution_clock::now();
+    //getting the encrypted client data
     bdt_ct *p_data = new bdt_ct();
     ebdt_deserialize(p_data, "encrypted_data", depth);
     bdt_ct encrypted_data = *p_data;
-    auto stopDataLoad = high_resolution_clock::now();
-    double dataLoadTime = duration_cast<milliseconds>(stopDataLoad - startDataLoad).count();
-    writeTimingToFile(timingFile, "Data_Loading", dataLoadTime);
     
-    // Homomorphic evaluation of the binary decision tree on the client data
-    auto startEvaluation = high_resolution_clock::now();
-    Ciphertext<DCRTPoly> output_ciphertext = encrypted_result(cc, encrypted_tree, encrypted_data, depth, pk);
-    auto stopEvaluation = high_resolution_clock::now();
-    double evaluationTime = duration_cast<milliseconds>(stopEvaluation - startEvaluation).count();
-    writeTimingToFile(timingFile, "Homomorphic_Evaluation", evaluationTime);
-    
-    // Serializing the final result
-    auto startSerialization = high_resolution_clock::now();
-    if (!Serial::SerializeToFile(RESULTSFOLDER + "/" + "output_ciphertext.txt", output_ciphertext, SerType::BINARY)) {
+    //homomorphic evaluation of the binary decision tree on the client data
+	Ciphertext<DCRTPoly> output_ciphertext = encrypted_result(cc, encrypted_tree, encrypted_data, depth, pk);
+	
+	//serializing the final result
+	if (!Serial::SerializeToFile(RESULTSFOLDER + "/" + "output_ciphertext.txt", output_ciphertext, SerType::BINARY)) {
         std::cerr << "Error writing serialization of output ciphertext to output_ciphertext.txt" << std::endl;
         return 1;
     }
     std::cout << "The output ciphertext has been serialized." << std::endl;
-    auto stopSerialization = high_resolution_clock::now();
-    double serializationTime = duration_cast<milliseconds>(stopSerialization - startSerialization).count();
-    writeTimingToFile(timingFile, "Result_Serialization", serializationTime);
     
-    auto stopTotal = high_resolution_clock::now();
-    double totalTime = duration_cast<milliseconds>(stopTotal - startTotal).count();
-    writeTimingToFile(timingFile, "Total_Evaluation_Process", totalTime);
     
-    // Clean up memory
-    delete p_tree;
-    delete p_data;
-    freeCTTree(&encrypted_tree);
-    freeCTTree(&encrypted_data);
-    
-    // Write configuration to file for reference
-    std::ofstream configFile(RESULTSFOLDER + "/config.txt");
-    configFile << "Tree Depth: " << depth << std::endl;
-    configFile << "Manual Depth Setting: " << (manualDepth > 0 ? "Yes" : "No") << std::endl;
-    if (manualDepth > 0) {
-        configFile << "Manual Depth Value: " << manualDepth << std::endl;
-    }
-    configFile.close();
-    
+    // Accumulate end-to-end execution time timer
+    accumulateTimer(applicationTimer, TOC_MS(appTimer));
+
+    // Num of homomorphic multiplications
+    setNumOfOperations(numOfMultiplications);
+
+    // Print all timers
+    printTimers();
+
+    #if defined(WITH_CUDA)
+    cudaUtils.destroy();
+    #endif
+      
+    //main return value
     return 0;
 }
